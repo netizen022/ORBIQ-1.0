@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%2307080d'/%3E%3Cpolygon points='50,12 74,50 50,88 26,50' fill='%237dffb2'/%3E%3Ccircle cx='78' cy='24' r='7' fill='%23ff3d5a'/%3E%3C/svg%3E">
+<meta property="og:type" content="website">
+<meta property="og:title" content="ORBIQ — Juego de arena HTML5 gratis">
+<meta property="og:description" content="Recoge orbes, esquiva círculos, encadena combos y desafía los modos Hardcore y Oleada infinita. Gratis en tu navegador.">
+<meta property="og:locale" content="es_ES">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="ORBIQ — Juego de arena HTML5 gratis">
+<meta name="twitter:description" content="Recoge orbes, esquiva círculos, encadena combos. Gratis en tu navegador.">
+<title>ORBIQ - Juego de arena HTML5 gratis</title>
+<meta name="description" content="ORBIQ: juego de arena gratis en el navegador. Recoge orbes, esquiva círculos, encadena combos y desafía el modo Hardcore.">
+<style>html,body{margin:0;height:100%;background:#07080d;overflow:hidden}canvas{position:absolute;cursor:none;display:block}</style>
+</head><body><canvas id="c"></canvas>
+<script>
+(()=>{'use strict';
+/* ===== CONSTANTES (ajusta el balance aquí) ===== */
+const W=960,H=600,DT=1/60;               // resolución lógica y paso fijo (60 FPS lógicos)
+const ORB_LIFE=6, ORB_MIN=5, ORB_MAX=50; // vida del orbe (s) y rango de valor
+const WAVE_GAP=[20,30], WAVE_DUR=[8,15], TELEGRAPH=2, INVULN=1.5, COMBO_TIME=7;
+const PU={shield:{n:'Escudo',c:'#ffd166',d:4},magnet:{n:'Imán',c:'#2de2e6',d:6},slow:{n:'Tiempo lento',c:'#a07bff',d:4},freeze:{n:'Congelar',c:'#ffffff',d:2},bomb:{n:'Detonador',c:'#ff8a3d',d:0},combo:{n:'Combo x2',c:'#ff5ea8',d:5}};
+const PUK=Object.keys(PU);
+/* Solo 2 modos con el mismo sistema de puntos (val:1). Hardcore (flag hc): 1 vida y oleadas más frecuentes (wave:.65) */
+const MODS=[
+ {n:'Normal',d:'3 vidas · dificultad progresiva',wave:1,cnt:1,val:1,life:1,hp:3,spd:1,cmb:1},
+ {n:'Hardcore',d:'1 vida · oleadas más frecuentes',wave:.65,cnt:1,val:1,life:1,hp:1,spd:1,cmb:1,hc:true},
+ {n:'Oleada infinita',d:'Sobrevive el máximo tiempo posible',wave:1,cnt:1.4,val:1,life:1,hp:1,spd:1.1,cmb:1,endless:true}
+];
+const ACH=[
+ {id:'w5',n:'Sobrevive 5 oleadas',ic:'🌊',d:'Llega a la oleada 5 en Normal o Hardcore.'},
+ {id:'c8',n:'Alcanza combo x8',ic:'🔥',d:'Encadena orbes hasta combo x8 (racha perfecta).'},
+ {id:'c15',n:'Alcanza combo x15',ic:'💥',d:'Encadena orbes hasta combo x15 (requiere power-up Combo x2).'},
+ {id:'o100',n:'Recoge 100 orbes en una partida',ic:'💎',d:'Recoge 100 orbes sin morir.'},
+ {id:'boss1',n:'Derrota a un jefe',ic:'👑',d:'Derrota al jefe del nivel 10.'},
+ {id:'hc1000',n:'Hardcore: más de 1000 puntos',ic:'💀',d:'Termina una partida Hardcore con más de 1000 puntos.'}
+];
+const SKINS=[
+ {id:'default',n:'Clásico',req:null,d:'El cursor de siempre.'},
+ {id:'star',n:'Estrella',req:'c15',d:'Desbloqueado con combo x15.'},
+ {id:'ring',n:'Anillo doble',req:'o100',d:'Desbloqueado con 100 orbes en una partida.'},
+ {id:'diamond',n:'Rombo',req:'w5',d:'Desbloqueado con 5 oleadas.'}
+];
+/* --- Constantes de menú y récords (nuevo) --- */
+const NAME_MAX=12, SCORES_MAX=10;                        // longitud máxima del nombre y tamaño de la tabla
+const MODE_C={normal:'#7dffb2',hardcore:'#ff3d5a',endless:'#2de2e6'};      // color de la etiqueta de cada modo
+const LVMSG={2:'¡Oleadas más frecuentes!',3:'¡Patrones combinados!',5:'¡Mini-oleadas!',7:'¡Círculos rebotadores!'};
+
+/* ===== UTILIDADES ===== */
+const rnd=(a,b)=>a+Math.random()*(b-a),ri=(a,b)=>Math.floor(rnd(a,b+1)),pick=a=>a[Math.floor(Math.random()*a.length)];
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v)),dist=(a,b,c,d)=>Math.hypot(a-c,b-d);
+const store={get(k,d){try{const v=localStorage.getItem('av_'+k);return v===null?d:JSON.parse(v)}catch(e){return d}},
+ set(k,v){try{localStorage.setItem('av_'+k,JSON.stringify(v));return true}catch(e){return false}}};
+
+/* ===== AUDIO (Web Audio, osciladores) ===== */
+let ac=null,muted=false;
+function initAudio(){if(!ac){try{ac=new(window.AudioContext||window.webkitAudioContext)()}catch(e){}}if(ac&&ac.state==='suspended')ac.resume()}
+function tone(f,d=.12,type='sine',v=.08,slide=0){
+ if(!ac||muted)return;const t=ac.currentTime,o=ac.createOscillator(),g=ac.createGain();
+ o.type=type;o.frequency.setValueAtTime(f,t);if(slide)o.frequency.exponentialRampToValueAtTime(Math.max(30,f+slide),t+d);
+ g.gain.setValueAtTime(v,t);g.gain.exponentialRampToValueAtTime(.0001,t+d);o.connect(g);g.connect(ac.destination);o.start(t);o.stop(t+d)}
+const seq=(fs,gap,type,v)=>fs.forEach((f,i)=>setTimeout(()=>tone(f,.15,type,v),i*gap));
+const sfx={collect:m=>tone(520+m*90,.12,'triangle',.09),miss:()=>tone(200,.2,'sawtooth',.06,-100),
+ power:()=>seq([660,990],90,'square',.06),hit:()=>tone(120,.3,'sawtooth',.12,-60),level:()=>seq([523,659,784,1047],90,'triangle',.08),
+ die:()=>tone(300,.9,'sawtooth',.12,-260),alarm:p=>tone(300+p*500,.12,'square',.05),boom:()=>tone(160,.4,'sawtooth',.12,-120),
+ nav:()=>tone(420,.06,'triangle',.05)}; // nav: sonido suave al moverse por el menú
+const ARP=[220,261.6,329.6,392,329.6,261.6]; // arpegio de fondo
+
+/* ===== ESTADO ===== */
+const cv=document.getElementById('c'),ctx=cv.getContext('2d');
+const mouse={x:W/2,y:H/2};
+let scene='menu',G=null,K=1,parts=[],texts=[],trail=[];   // escenas: menu, playmenu, howto, records, achievements, skins, play, revive, name, over
+let rec=store.get('rec',0),bestCombo=store.get('bc',1),ach=store.get('ach',{});
+// Migración de ids de logros antiguos a los nuevos
+const ACH_MIG={'w3':'w5','c5':'c8','c10':'c15','o50':'o100','hc500':'hc1000'};
+let achChanged=false;
+Object.keys(ACH_MIG).forEach(oldId=>{
+ if(ach[oldId]){ach[ACH_MIG[oldId]]=1;delete ach[oldId];achChanged=true}
+});
+if(achChanged)store.set('ach',ach);
+let recHC=store.get('rec_hardcore',0);                    // récord separado del modo Hardcore
+let recHCTime=store.get('rec_hc_time',0);                 // mejor tiempo sobrevivido en Hardcore (s)
+let unlockedEndless=store.get('endless',0)?true:false;    // modo Oleada infinita desbloqueado (nivel 10 en Normal)
+let recEndless=store.get('rec_endless',0);                // récord de tiempo en Oleada infinita (s)
+let unlockedSkins=store.get('skins',['default']);         // ids de skins desbloqueadas
+let selSkin=store.get('skin','default');                  // skin elegida
+if(!Array.isArray(unlockedSkins)||!unlockedSkins.includes('default'))unlockedSkins=['default'];
+SKINS.forEach(s=>{if(s.req&&ach[s.req]&&!unlockedSkins.includes(s.id))unlockedSkins.push(s.id)});   // logros ya obtenidos antes
+if(!unlockedSkins.includes(selSkin))selSkin='default';
+
+/* ===== ESTADO DE MENÚ Y RÉCORDS (nuevo) ===== */
+let eggMode=false,eggBuf='';            // easter egg: escribir 'egg' cambia los círculos por huevos de Pascua
+let sel=0,sceneT=0;                   // opción seleccionada y segundos en la escena actual
+const nm={text:''};                    // texto del input de nombre
+let hl=null;                           // entrada recién agregada a resaltar: {e:entrada, t:segundos restantes}
+// ¿Funciona localStorage? (en modo privado puede fallar). Si no, el juego sigue y avisamos en pantalla.
+let storeOK=(()=>{try{const k='av__test';localStorage.setItem(k,'1');localStorage.removeItem(k);return true}catch(e){return false}})();
+const byScore=(a,b)=>b.score-a.score||(a.date||0)-(b.date||0);   // mayor puntuación primero; empate: la más antigua
+// Carga las dos tablas independientes ('av_scores_normal' y 'av_scores_hardcore').
+// Migración: si existe el antiguo 'av_scores' (mezclado), reparte sus entradas por modo, guarda y lo elimina.
+function loadScores(){
+ const ok=e=>e&&typeof e.name==='string'&&typeof e.score==='number';
+ const list=k=>{const a=store.get(k,[]);return Array.isArray(a)?a.filter(ok):[]};
+ let n=list('scores_normal'),h=list('scores_hardcore');
+ const old=store.get('scores',null);
+ if(Array.isArray(old))old.filter(ok).forEach(e=>{if(e.mode==='hardcore')h.push(e);else if(e.mode==='normal')n.push(e)});
+ const top=(a,m)=>a.filter(e=>e.mode===m).sort(byScore).slice(0,SCORES_MAX);
+ n=top(n,'normal');h=top(h,'hardcore');
+ if(Array.isArray(old)){const x=store.set('scores_normal',n),y=store.set('scores_hardcore',h);
+  if(x&&y){try{localStorage.removeItem('av_scores')}catch(e){}}}
+ return [n,h]}
+let [scoresNormal,scoresHardcore]=loadScores();   // tablas en memoria (siguen funcionando aunque localStorage falle)
+// Agrega la entrada a la tabla de su modo, ordena, recorta al top 10 y guarda solo esa tabla.
+// Devuelve la entrada si quedó dentro del top 10, o null si no entró.
+function addScore(e){const hc=e.mode==='hardcore',t=(hc?scoresHardcore:scoresNormal).concat(e).sort(byScore).slice(0,SCORES_MAX);
+ if(hc)scoresHardcore=t;else scoresNormal=t;
+ if(!store.set(hc?'scores_hardcore':'scores_normal',t))storeOK=false;return t.includes(e)?e:null}
+const curRec=()=>G&&G.hc?recHC:rec;    // récord del modo de la partida actual
+function fdate(ms){const d=new Date(ms);if(isNaN(d))return '--/--/--';const p=n=>String(n).padStart(2,'0');
+ return p(d.getDate())+'/'+p(d.getMonth()+1)+'/'+p(d.getFullYear()%100)}   // fecha corta dd/mm/aa
+function go(s){scene=s;sel=0;sceneT=0}      // cambia de escena y reinicia el estado de menú
+function fmtTime(s){s=Math.max(0,s);return Math.floor(s/60)+':'+String(Math.floor(s%60)).padStart(2,'0')}   // mm:ss
+const live=()=>G&&(scene==='play'||scene==='name'||scene==='over'||scene==='revive');   // ¿se dibuja la partida (mundo + HUD)?
+const dust=Array.from({length:50},()=>({x:rnd(0,W),y:rnd(0,H),vx:rnd(-6,6),vy:rnd(-6,6)}));
+
+function newGame(modo='normal'){
+ // Normal: modificador 'Normal' · Hardcore: fuerza el modificador Hardcore
+ const hc=modo==='hardcore',endless=modo==='endless',
+  mod=hc?MODS.find(m=>m.hc):endless?MODS.find(m=>m.endless):MODS.find(m=>m.n==='Normal');parts=[];texts=[];hl=null;eggMode=false;
+ G={t:0,score:0,lives:mod.hp,lvl:1,energy:0,streak:0,combo:1,comboT:0,orbs:[],circles:[],mod,inv:0,shake:0,
+  pu:null,armed:false,puOrb:null,orbT:.5,puT:rnd(10,16),
+  phase:endless?'wave':'calm',waveT:endless?9999:rnd(12,18),total:endless?9999:0,spawned:0,dur:endless?9999:10,theme:['line'],
+  waves:0,miniT:10,got:0,maxCombo:1,banner:{t:3.5,a:'Modificador: '+mod.n,b:mod.d},flash:0,mt:0,mstep:0,newAch:[],alarmT:0,
+  hc,mode:modo,
+  perfectStreak:0,                 // Bloque A: orbes seguidos sin fallar ni recibir daño
+  runT:0,                          // Bloque D: tiempo de la partida (s)
+  reviveUsed:false,pendingRevive:false,   // Bloque E: crédito de revivir
+  safeZone:null,safeT:rnd(25,35),  // Bloque G: zona segura
+  boss:null,bossSpawned:{},        // Bloque K: jefe cada 10 niveles
+  endless,endT:0,endWaveT:20,endSpawnT:0,endlessUnlockedNow:false};   // Bloque C: Oleada infinita
+ if(endless)chooseTheme();
+ go('play');
+}
+const need=()=>100+G.lvl*100;   // nivel 2→300, nivel 5→600, nivel 10→1100
+function burst(x,y,c,n,sp=160,life=.6){for(let i=0;i<n;i++){const a=rnd(0,6.283),s=rnd(.2,1)*sp;
+ parts.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,l:rnd(.3,1)*life,m:life,c,s:rnd(1.5,3.5)})}}
+const ft=(x,y,s,c,sz=16)=>texts.push({x,y,s,c,sz,l:1});
+function unlock(id){if(ach[id])return;ach[id]=1;store.set('ach',ach);G.newAch.push(ACH.find(a=>a.id===id).n);
+ SKINS.forEach(s=>{if(s.req===id&&!unlockedSkins.includes(s.id)){unlockedSkins.push(s.id);store.set('skins',unlockedSkins)}})}
+
+/* ===== SPAWN: orbes, power-ups y círculos ===== */
+function spawnOrb(){
+ for(let i=0;i<10;i++){const x=rnd(50,W-50),y=rnd(90,H-50);
+  if(G.orbs.every(o=>dist(o.x,o.y,x,y)>70)){const golden=Math.random()<0.05;   // 5% dorados: 3x valor, mitad de vida
+   G.orbs.push({x,y,age:0,life:ORB_LIFE*G.mod.life*Math.max(.4,1-.05*(G.lvl-1))*(golden?0.5:1),ph:rnd(0,6),golden});return}}}   // la vida del orbe se acorta con el nivel (tope 40%: 2.4 s)
+const orbVal=o=>{const base=Math.round((ORB_MAX-(ORB_MAX-ORB_MIN)*clamp(o.age/o.life,0,1))*(1+.1*(G.lvl-1))*G.mod.val);return Math.round(base*(o.golden?3:1))};
+function spawnPU(){G.puOrb={x:rnd(80,W-80),y:rnd(110,H-80),k:pick(PUK),age:0,life:8}}
+// Fairness: nunca aparece a <80px del cursor (los círculos nacen fuera de pantalla)
+function spawnCircle(type){
+ const r=rnd(14,30),e=ri(0,3);let x,y;
+ if(e===0){x=rnd(0,W);y=-r-4}else if(e===1){x=W+r+4;y=rnd(0,H)}else if(e===2){x=rnd(0,W);y=H+r+4}else{x=-r-4;y=rnd(0,H)}
+ if(dist(x,y,mouse.x,mouse.y)<80+r)return false;
+ const a=Math.atan2(rnd(120,H-120)-y,rnd(160,W-160)-x),sp=rnd(70,140)*(1+.08*(G.lvl-1))*G.mod.spd,sg=Math.random()<.5?-1:1;   // velocidad de círculos: +8% por nivel
+ const turn=type==='curve'?rnd(.4,.9)*sg:type==='spiral'?rnd(1.4,2.2)*sg:0;
+ const color=type==='curve'?'#ff8a3d':type==='spiral'?'#a07bff':type==='bounce'?'#ffd166':'#ff3d5a';   // color según patrón
+ G.circles.push({x,y,r,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,type,turn,age:0,rot:0,tr:[],bounce:type==='bounce',color});
+ return true}
+function waveCount(){return Math.round(clamp(8+(G.lvl-1)*2.2,8,30)*G.mod.cnt)}
+function chooseTheme(){ // patrones procedurales según nivel
+ const t=['line','curve'];if(G.lvl>=3)t.push('spiral');if(G.lvl>=7)t.push('bounce');
+ G.theme=G.lvl>=3?[pick(t),pick(t)]:[pick(t)]}
+
+/* ===== SUBIDA DE NIVEL, DAÑO, RECOLECCIÓN ===== */
+function levelUp(){
+ G.energy-=need();G.lvl++;G.banner={t:3,a:'NIVEL '+G.lvl,b:LVMSG[G.lvl]||'¡Más rápido y más intenso!'};
+ if(G.lvl%10===0&&!G.bossSpawned[G.lvl]){   // Bloque K: jefe en los niveles 10, 20, 30...
+  G.bossSpawned[G.lvl]=true;
+  G.boss={x:W/2,y:-80,r:60,hp:5,phase:1,t:0,shootT:2,vx:0,vy:0,entering:true};
+  G.banner={t:3,a:'¡JEFE!',b:'Nivel '+G.lvl+' · 5 impactos'}}
+ sfx.level();burst(mouse.x,mouse.y,'#7dffb2',40,260,1);spawnPU()}
+function collectOrb(o){
+ const v=orbVal(o),prev=G.combo;G.streak++;G.perfectStreak++;
+ // Bloque A: el techo del combo sube con la racha perfecta (5 → x6, 9 → x8, 15 → x10)
+ let cap=G.perfectStreak>=15?10:G.perfectStreak>=9?8:G.perfectStreak>=5?6:5;
+ G.combo=Math.min(cap,1+Math.floor(G.streak/3));G.comboT=COMBO_TIME*G.mod.cmb;
+ // Bloque B: con "Combo x2" activo cada orbe suma +1 al combo (tope 15)
+ if(G.pu&&G.pu.k==='combo')G.combo=Math.min(15,Math.max(G.combo,prev+1));
+ G.maxCombo=Math.max(G.maxCombo,G.combo);
+ const pts=v*G.combo;G.score+=pts;G.energy+=v;G.got++;
+ ft(o.x,o.y-10,'+'+pts,orbColor(o),18);burst(o.x,o.y,orbColor(o),14);sfx.collect(G.combo);
+ if(o.golden)sfx.power();
+ if(G.combo>=8)unlock('c8');if(G.combo>=15)unlock('c15');if(G.got>=100)unlock('o100');
+ G.orbs.splice(G.orbs.indexOf(o),1);if(!G.endless)while(G.energy>=need())levelUp()}
+function activate(k){
+ const p=PU[k];ft(mouse.x,mouse.y-24,p.n,p.c,20);burst(mouse.x,mouse.y,p.c,24,200);sfx.power();
+ if(k==='bomb')G.armed=true;else G.pu={k,t:p.d,m:p.d}}
+function detonate(){ // Detonador: destruye todos los círculos y da puntos
+ G.circles.forEach(c=>{const p=25*G.combo;G.score+=p;ft(c.x,c.y,'+'+p,'#ff8a3d');burst(c.x,c.y,'#ff8a3d',16,220)});
+ G.circles=[];G.armed=false;G.shake=5;sfx.boom()}
+function hurt(){
+ G.lives--;G.inv=INVULN;G.streak=0;G.combo=1;G.perfectStreak=0;G.shake=5;sfx.hit();burst(mouse.x,mouse.y,'#ff3d5a',30,240);
+ if(G.lives<=0){
+  if(G.hc||G.reviveUsed)gameOver();   // Hardcore: sin revivir
+  else{G.pendingRevive=true;go('revive')}}}   // Bloque E: ofrece revivir una vez
+function gameOver(){
+ burst(mouse.x,mouse.y,'#e8ecff',90,320,1.4);sfx.die();G.banner.t=0;   // oculta el cartel inicial si se muere muy pronto
+ // Récord separado por modo: 'av_rec' (normal) y 'av_rec_hardcore'
+ if(G.endless){if(G.endT>recEndless){recEndless=Math.floor(G.endT);store.set('rec_endless',recEndless)}}   // Oleada infinita: solo récord de tiempo
+ else if(G.hc){if(G.score>recHC){recHC=G.score;store.set('rec_hardcore',recHC)}}
+ else if(G.score>rec){rec=G.score;store.set('rec',rec)}
+ if(G.maxCombo>bestCombo){bestCombo=G.maxCombo;store.set('bc',bestCombo)}
+ if(G.hc&&G.score>1000)unlock('hc1000');
+ if(G.hc&&G.runT>recHCTime){recHCTime=Math.floor(G.runT);store.set('rec_hc_time',recHCTime)}   // Bloque D
+ if(G.mode==='normal'&&G.lvl>=10&&!unlockedEndless){unlockedEndless=true;store.set('endless',1);G.endlessUnlockedNow=true}   // Bloque C
+ if(G.endless){go('over');return}   // sin tabla de récords: no hay nombre que guardar
+ // Flujo: game over -> ingreso de nombre (si hay puntos) -> resultados -> menú
+ nm.text=String(store.get('name','')).replace(/[^\p{L}\p{N} ]/gu,'').slice(0,NAME_MAX);   // recuerda el último nombre usado
+ go(G.score>0?'name':'over')}
+
+/* ===== ENTRADA DE NOMBRE Y GUARDADO DE RÉCORD (nuevo) ===== */
+function saveEntry(skip){ // skip=true: omitir (Esc) y no guardar la puntuación
+ if(!skip){const name=nm.text.trim()||'Anónimo';store.set('name',name);
+  const e=addScore({name,score:G.score,mode:G.mode,level:G.lvl,combo:G.maxCombo,waves:G.waves,date:Date.now()});
+  hl=e?{e,t:6}:null}                       // resalta la entrada nueva unos segundos (si entró al top 10)
+ go('over')}
+function nameKey(e){ // teclado del input de nombre: solo letras, números y espacios, máx. NAME_MAX
+ if(sceneT<.3)return;                       // evita que una pulsación suelta al morir se cuele en el nombre
+ if(e.code==='Enter'||e.code==='NumpadEnter'){e.preventDefault();if(!e.repeat)saveEntry(false)}
+ else if(e.code==='Escape'){e.preventDefault();if(!e.repeat)saveEntry(true)}
+ else if(e.code==='Backspace'){e.preventDefault();nm.text=nm.text.slice(0,-1)}
+ else if(e.key.length===1&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&/^[\p{L}\p{N} ]$/u.test(e.key)){
+  e.preventDefault();if(nm.text.length<NAME_MAX)nm.text+=e.key}}
+
+/* ===== INPUT ===== */
+function click(){
+ if(scene!=='play')return;
+ if(G.safeZone&&dist(mouse.x,mouse.y,G.safeZone.x,G.safeZone.y)<G.safeZone.r)return;   // Bloque G: en la zona segura no se recoge nada
+ const bs=G.boss;
+ if(bs&&!bs.entering&&dist(mouse.x,mouse.y,bs.x,bs.y)<bs.r+10){   // Bloque K: clic sobre el jefe lo daña
+  bs.hp--;bs.phase=bs.hp<=3?(bs.hp<=1?3:2):1;
+  burst(bs.x,bs.y,'#ff8a3d',20,200);sfx.hit();
+  if(bs.hp<=0){
+   for(let i=0;i<15;i++)G.orbs.push({x:clamp(bs.x+rnd(-60,60),30,W-30),y:clamp(bs.y+rnd(-60,60),90,H-30),age:0,life:ORB_LIFE,ph:rnd(0,6),golden:true});
+   G.score+=500;G.boss=null;G.shake=8;sfx.boom();ft(W/2,200,'¡JEFE DERROTADO! +500','#ffd166',26);unlock('boss1')}
+  return}
+ let got=false,justPU=false;
+ if(G.puOrb&&dist(mouse.x,mouse.y,G.puOrb.x,G.puOrb.y)<26){const k=G.puOrb.k;G.puOrb=null;activate(k);got=justPU=true}
+ let best=null,bd=24;G.orbs.forEach(o=>{const d=dist(mouse.x,mouse.y,o.x,o.y);if(d<bd){bd=d;best=o}});
+ if(best){collectOrb(best);got=true}
+ if(G.armed&&!justPU)detonate();
+ if(!got)burst(mouse.x,mouse.y,'#7f88a8',6,60,.3)}
+function pos(e){const r=cv.getBoundingClientRect();mouse.x=clamp((e.clientX-r.left)*W/r.width,0,W);mouse.y=clamp((e.clientY-r.top)*H/r.height,0,H)}
+/* ===== MENÚ PRINCIPAL (nuevo): opciones, hit-test y acciones ===== */
+// Menú principal: solo 5 opciones; los modos viven en la subpantalla 'playmenu'
+function buildMenu(){
+ return [
+  {label:'Jugar',c:'#7dffb2',d:'Elige un modo de juego.',act:()=>go('playmenu')},
+  {label:'Récords',c:'#ffd166',d:'Top 10 de jugadores guardado en este navegador.',act:()=>go('records')},
+  {label:'Logros',c:'#ff8a3d',d:'Consulta tus logros desbloqueados.',act:()=>go('achievements')},
+  {label:'Skins',c:'#a07bff',d:'Elige el aspecto de tu cursor.',act:()=>go('skins')},
+  {label:'Cómo jugar',c:'#e8ecff',d:'Instrucciones y controles.',act:()=>go('howto')}]}
+// Submenú de modos: "Oleada infinita" aparece siempre, con candado hasta desbloquearla
+function buildPlayMenu(){
+ return [
+  {label:'Modo Normal',c:'#7dffb2',d:'3 vidas · dificultad progresiva · récord propio.',act:()=>newGame('normal')},
+  {label:'Modo Hardcore',c:'#ff3d5a',d:'1 vida · oleadas más frecuentes · sin revivir · récord propio.',act:()=>newGame('hardcore')},
+  {label:'Oleada infinita',c:'#2de2e6',
+   d:unlockedEndless?'Sobrevive el máximo tiempo posible. Récord de tiempo propio.':'Desbloqueado al llegar a nivel 10 en Normal.',
+   locked:!unlockedEndless,
+   act:()=>{if(unlockedEndless)newGame('endless');else sfx.miss()}}]}
+const BACK=y=>({label:'Volver',c:'#7dffb2',sz:17,x:W/2-100,y,w:200,h:34,act:()=>go('menu')});
+// Opciones clicables de la escena actual, con su rectángulo (se usan para dibujar, hover y clic)
+function items(){
+ if(scene==='menu')return buildMenu().map((m,i)=>({...m,x:W/2-200,y:214+i*44,w:400,h:38}));
+ if(scene==='playmenu')return buildPlayMenu().map((m,i)=>({...m,x:W/2-200,y:190+i*70,w:400,h:52}))
+  .concat([{label:'Volver',c:'#7dffb2',sz:16,x:W/2-100,y:460,w:200,h:34,act:()=>go('menu')}]);
+ if(scene==='records')return [BACK(520)];
+ if(scene==='achievements')return [BACK(540)];
+ if(scene==='skins')return SKINS.map((s,i)=>({label:s.n,c:'#a07bff',skin:s,x:50+i*220,y:190,w:200,h:140,
+  act:()=>{if(unlockedSkins.includes(s.id)){selSkin=s.id;store.set('skin',selSkin);sfx.collect(1)}else sfx.miss()}})).concat([BACK(520)]);
+ if(scene==='revive')return [
+  {label:'Revivir (mitad de puntos)',c:'#7dffb2',sz:16,x:W/2-260,y:400,w:240,h:50,
+   act:()=>{G.score=Math.floor(G.score/2);G.lives=1;G.reviveUsed=true;G.pendingRevive=false;
+    G.inv=INVULN;G.phase=G.endless?'wave':'calm';G.waveT=G.endless?9999:3;go('play')}},
+  {label:'Aceptar derrota',c:'#ff3d5a',sz:16,x:W/2+20,y:400,w:240,h:50,
+   act:()=>{G.reviveUsed=true;go('over');gameOver()}}];   // gameOver hace su trabajo normal (récords, nombre...)
+ return []}
+const hit=it=>mouse.x>=it.x&&mouse.x<=it.x+it.w&&mouse.y>=it.y&&mouse.y<=it.y+it.h;
+const NAVS=['menu','playmenu','records','achievements','skins','revive'];   // escenas con opciones clicables
+function hover(){if(!NAVS.includes(scene))return;const i=items().findIndex(hit);if(i>=0&&i!==sel){sel=i;sfx.nav()}}
+function backToMenu(){G=null;go('menu')}   // del resultado al menú principal
+cv.addEventListener('mousemove',e=>{pos(e);hover()});
+cv.addEventListener('mousedown',e=>{pos(e);initAudio();
+ if(scene==='play')click();
+ else if(scene==='howto'){if(sceneT>.25)go('menu')}
+ else if(scene==='menu'||scene==='playmenu'||scene==='records'||scene==='achievements'||scene==='skins'){const it=items().find(hit);if(it)it.act()}
+ else if(scene==='revive'){if(sceneT>.4){const it=items().find(hit);if(it)it.act()}}   // pequeña guarda: evita un clic accidental al morir
+ else if(scene==='over'&&sceneT>.6)backToMenu()});
+addEventListener('keydown',e=>{
+ initAudio();
+ if(scene==='name'){nameKey(e);return}          // en el input de nombre la M es una letra más
+ // Easter egg: buffer de las últimas 3 teclas; 'egg' activa/desactiva el modo huevo
+ if(e.key&&e.key.length===1){eggBuf=(eggBuf+e.key.toLowerCase()).slice(-3);if(eggBuf==='egg'){eggMode=!eggMode;eggBuf=''}}
+ if(e.code==='KeyM'){muted=!muted;return}        // silenciar: funciona en todas las demás escenas
+ const up=e.code==='ArrowUp'||e.code==='KeyW',dn=e.code==='ArrowDown'||e.code==='KeyS',
+  lf=e.code==='ArrowLeft'||e.code==='KeyA',rt=e.code==='ArrowRight'||e.code==='KeyD',
+  enter=(e.code==='Enter'||e.code==='NumpadEnter')&&!e.repeat,esc=e.code==='Escape'&&!e.repeat;
+ if(scene==='menu'||scene==='playmenu'||scene==='records'||scene==='skins'||scene==='revive'){
+  const n=items().length;
+  if(up||dn||(scene!=='menu'&&scene!=='playmenu'&&(lf||rt))){e.preventDefault();sel=(sel+(dn||rt?1:-1)+n)%n;sfx.nav()}
+  else if(enter){if(scene!=='revive'||sceneT>.4)items()[sel].act()}
+  else if((scene==='records'||scene==='skins'||scene==='playmenu')&&esc)go('menu')}   // en 'revive' no hay Esc: hay que elegir
+ else if(scene==='achievements'){if(enter||esc)go('menu')}
+ else if(scene==='howto'){if(enter||esc)go('menu')}
+ else if(scene==='over'){if((enter||esc)&&sceneT>.6)backToMenu()}});
+function resize(){const s=Math.min(innerWidth/W,innerHeight/H),d=window.devicePixelRatio||1;
+ cv.style.width=W*s+'px';cv.style.height=H*s+'px';cv.style.left=(innerWidth-W*s)/2+'px';cv.style.top=(innerHeight-H*s)/2+'px';
+ cv.width=Math.round(W*s*d);cv.height=Math.round(H*s*d);K=cv.width/W}
+addEventListener('resize',resize);resize();
+
+/* ===== UPDATE ===== */
+function updateFX(){
+ trail.push({x:mouse.x,y:mouse.y,l:.4});trail.forEach(p=>p.l-=DT);trail=trail.filter(p=>p.l>0);
+ parts.forEach(p=>{p.x+=p.vx*DT;p.y+=p.vy*DT;p.vx*=.97;p.vy*=.97;p.l-=DT});parts=parts.filter(p=>p.l>0);
+ texts.forEach(t=>{t.y-=30*DT;t.l-=DT});texts=texts.filter(t=>t.l>0);
+ dust.forEach(d=>{const dd=dist(d.x,d.y,mouse.x,mouse.y);if(dd<110&&dd>1){d.x+=(d.x-mouse.x)/dd*1.6;d.y+=(d.y-mouse.y)/dd*1.6}
+  d.x=(d.x+d.vx*DT+W)%W;d.y=(d.y+d.vy*DT+H)%H})}
+function updateGame(dt){
+ G.t+=dt;G.runT+=dt;if(G.endless)G.endT+=dt;if(G.inv>0)G.inv-=dt;G.shake*=.9;if(G.flash>0)G.flash-=dt;if(G.banner.t>0)G.banner.t-=dt;
+ if(G.streak>0){G.comboT-=dt;if(G.comboT<=0){G.streak=0;G.combo=1}}
+ if(G.pu){G.pu.t-=dt;if(G.pu.t<=0)G.pu=null}
+ const pk=G.pu&&G.pu.k,spd=pk==='freeze'?0:pk==='slow'?.4:1;
+ // orbes normales: spawn, envejecer, imán y expiración (rompe combo)
+ G.orbT-=dt;if(G.orbT<=0){if(G.orbs.length<6)spawnOrb();G.orbT=rnd(.8,1.5)/(1+.03*G.lvl)}
+ for(const o of G.orbs.slice()){o.age+=dt;
+  if(pk==='magnet'){const d=dist(o.x,o.y,mouse.x,mouse.y);if(d<150&&d>2){o.x+=(mouse.x-o.x)/d*200*dt;o.y+=(mouse.y-o.y)/d*200*dt}}
+  if(o.age>=o.life){G.orbs.splice(G.orbs.indexOf(o),1);G.streak=0;G.combo=1;G.perfectStreak=0;sfx.miss();burst(o.x,o.y,'#555a70',8,60)}}
+ // power-up en pantalla (máximo uno)
+ if(G.puOrb){G.puOrb.age+=dt;if(G.puOrb.age>=G.puOrb.life)G.puOrb=null}
+ else{G.puT-=dt;if(G.puT<=0){spawnPU();G.puT=rnd(14,22)}}
+ // Bloque G: zonas seguras temporales (sin daño, pero tampoco se recoge nada)
+ G.safeT-=dt;
+ if(G.safeZone){G.safeZone.t-=dt;if(G.safeZone.t<=0)G.safeZone=null}
+ else if(G.safeT<=0){
+  for(let i=0;i<10;i++){const x=rnd(120,W-120),y=rnd(120,H-120);
+   if(dist(x,y,mouse.x,mouse.y)>150){G.safeZone={x,y,r:90,t:4};G.safeT=rnd(25,35);sfx.power();break}}}
+ const inSafe=G.safeZone&&dist(mouse.x,mouse.y,G.safeZone.x,G.safeZone.y)<G.safeZone.r;
+ // oleadas: calma -> telegraph -> oleada
+ if(G.endless){   // Oleada infinita: una sola oleada continua; cada 20 s sube el nivel
+  G.endWaveT-=dt;
+  if(G.endWaveT<=0){G.endWaveT=20;G.lvl++;chooseTheme();G.banner={t:2,a:'OLEADA '+(G.lvl-1),b:'¡Más rápido!'}}
+  G.endSpawnT-=dt;   // ritmo de aparición (cada vez más rápido) con tope de círculos simultáneos
+  if(G.endSpawnT<=0){G.endSpawnT=Math.max(.15,.9-.04*G.lvl)/G.mod.cnt;
+   if(G.circles.length<30+G.lvl*2&&spawnCircle(pick(G.theme)))G.spawned++}}
+ else if(G.phase==='calm'){G.waveT-=dt;if(G.waveT<=0){G.phase='tele';G.waveT=TELEGRAPH;G.alarmT=0;chooseTheme()}
+  if(G.lvl>=5){G.miniT-=dt;if(G.miniT<=0){G.miniT=rnd(8,12);G.flash=.6;const n=Math.round((3+G.lvl/2)*G.mod.cnt);for(let i=0;i<n;i++)spawnCircle(pick(G.theme))}}}
+ else if(G.phase==='tele'){G.waveT-=dt;G.alarmT-=dt;if(G.alarmT<=0){sfx.alarm(1-G.waveT/TELEGRAPH);G.alarmT=.25}
+  if(G.waveT<=0){G.phase='wave';G.dur=rnd(...WAVE_DUR);G.waveT=G.dur;G.total=waveCount();G.spawned=0}}
+ else{G.waveT-=dt;const goal=G.total*Math.min(1,(G.dur-G.waveT)/(G.dur*.6));
+  while(G.spawned<goal){if(spawnCircle(pick(G.theme)))G.spawned++;else break}
+  if(G.waveT<=0){G.phase='calm';G.waves++;if(G.waves>=5)unlock('w5');
+   G.waveT=rnd(...WAVE_GAP)*G.mod.wave*Math.max(.4,1-.05*G.lvl);G.circles.forEach(c=>c.bounce=false)}}   // oleadas más seguidas por nivel (tope 40%)
+ // círculos: movimiento por patrón, atracción de orbes viejos, colisión con el cursor
+ for(const c of G.circles.slice()){
+  c.age+=dt;c.rot+=dt*2;const s=spd*dt;
+  const turn=c.type==='spiral'?c.turn/(1+c.age*.5):c.turn;
+  if(turn){const a=Math.atan2(c.vy,c.vx)+turn*s,sp=Math.hypot(c.vx,c.vy);c.vx=Math.cos(a)*sp;c.vy=Math.sin(a)*sp}
+  G.orbs.forEach(o=>{if(o.age/o.life>.5){const d=dist(o.x,o.y,c.x,c.y);if(d<160&&d>1){c.vx+=(o.x-c.x)/d*35*s;c.vy+=(o.y-c.y)/d*35*s}}});
+  c.x+=c.vx*s;c.y+=c.vy*s;
+  if(c.bounce){if((c.x<c.r&&c.vx<0)||(c.x>W-c.r&&c.vx>0))c.vx*=-1;if((c.y<c.r&&c.vy<0)||(c.y>H-c.r&&c.vy>0))c.vy*=-1}
+  c.tr.push({x:c.x,y:c.y});if(c.tr.length>10)c.tr.shift();
+  if(c.age>2&&(c.x<-c.r-60||c.x>W+c.r+60||c.y<-c.r-60||c.y>H+c.r+60))G.circles.splice(G.circles.indexOf(c),1);
+  else if(G.inv<=0&&pk!=='shield'&&!inSafe&&dist(c.x,c.y,mouse.x,mouse.y)<c.r+4){hurt();if(scene!=='play')return}}
+ // Bloque K: jefe (3 fases según vida restante)
+ if(G.boss){
+  const b=G.boss;b.t+=dt;
+  if(b.entering){b.y+=60*dt;if(b.y>=120)b.entering=false}
+  else{
+   if(b.phase===1){b.x=W/2+Math.sin(b.t*0.8)*250;b.y=120+Math.cos(b.t*1.2)*40}
+   if(b.phase===2){b.x=W/2+Math.sin(b.t*1.2)*300;b.y=140+Math.sin(b.t*2)*60;
+    b.shootT-=dt;
+    if(b.shootT<=0){b.shootT=1.5;const a=Math.atan2(mouse.y-b.y,mouse.x-b.x),sp=180;   // dispara hacia el cursor
+     G.circles.push({x:b.x,y:b.y,r:10,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,type:'line',turn:0,age:0,rot:0,tr:[],bounce:false,color:'#ff3d5a'})}}
+   if(b.phase===3){b.x=W/2+Math.cos(b.t*1.5)*200;b.y=160+Math.sin(b.t*1.8)*80}
+   if(G.inv<=0&&pk!=='shield'&&!inSafe&&dist(b.x,b.y,mouse.x,mouse.y)<b.r+4){hurt();if(scene!=='play')return}}}
+ // música: arpegio que se acelera durante la oleada
+ G.mt+=dt;const iv=G.phase==='wave'?.14:.22;
+ if(G.mt>=iv){G.mt-=iv;G.mstep++;tone(ARP[G.mstep%6]*(G.phase==='wave'?2:1),.18,'sine',.03)}}
+function update(){updateFX();sceneT+=DT;
+ if(hl&&scene==='records'&&hl.t>0)hl.t-=DT;               // el resaltado corre mientras se ve la tabla completa
+ if(G&&scene!=='play')G.shake*=.9;                        // el temblor se apaga también fuera de la partida
+ if(scene==='play')updateGame(DT)}
+
+/* ===== RENDER ===== */
+const orbHue=o=>120-120*clamp(o.age/o.life,0,1),orbColor=o=>o.golden?'#ffd166':'hsl('+orbHue(o)+',90%,60%)';
+function txt(s,x,y,sz,c,al='left',a=1){ctx.globalAlpha=a;ctx.fillStyle=c;ctx.font='600 '+sz+'px "Trebuchet MS",Segoe UI,sans-serif';ctx.textAlign=al;ctx.fillText(s,x,y);ctx.globalAlpha=1}
+function poly(x,y,r,n,rot=0){ctx.beginPath();for(let i=0;i<n;i++){const a=rot+i*6.283/n;ctx[i?'lineTo':'moveTo'](x+Math.cos(a)*r,y+Math.sin(a)*r)}ctx.closePath()}
+function glow(c,b=14){ctx.shadowColor=c;ctx.shadowBlur=b}
+function puShape(k,x,y,r,c,t){ // formas distintivas de cada power-up
+ ctx.strokeStyle=c;ctx.lineWidth=2.5;glow(c);ctx.beginPath();
+ if(k==='shield'){poly(x,y,r,6,t)}
+ else if(k==='magnet'){for(let a=0;a<12;a+=.3){const rr=a*r/12;ctx[a?'lineTo':'moveTo'](x+Math.cos(a+t)*rr,y+Math.sin(a+t)*rr)}}
+ else if(k==='slow'){ctx.arc(x,y,r,0,6.283);ctx.moveTo(x,y);ctx.lineTo(x,y-r*.7);ctx.moveTo(x,y);ctx.lineTo(x+r*.5,y)}
+ else if(k==='freeze'){for(let i=0;i<3;i++){const a=i*Math.PI/3+t*.5;ctx.moveTo(x-Math.cos(a)*r,y-Math.sin(a)*r);ctx.lineTo(x+Math.cos(a)*r,y+Math.sin(a)*r)}}
+ else if(k==='combo'){poly(x,y,r,5,t)}   // pentágono rosa
+ else{for(let i=0;i<16;i++){const a=i*Math.PI/8+t,rr=i%2?r*.5:r;ctx[i?'lineTo':'moveTo'](x+Math.cos(a)*rr,y+Math.sin(a)*rr)}ctx.closePath()}
+ ctx.stroke();ctx.shadowBlur=0}
+/* ===== EASTER EGG: círculos dibujados como huevos de Pascua ===== */
+const EGG_C=['#ffb3c8','#b3e5ff','#c8ffb3','#fff0b3','#e0b3ff'];   // paleta pastel
+const darken=(h,f)=>{const n=parseInt(h.slice(1),16);return 'rgb('+[n>>16&255,n>>8&255,n&255].map(v=>Math.round(v*f)).join(',')+')'};
+function drawEgg(c,pk){
+ if(!c.eggColor)c.eggColor=pick(EGG_C);                  // color estable por círculo (no parpadea)
+ const rx=c.r*.85,ry=c.r*1.15,dk=darken(c.eggColor,.7);
+ ctx.fillStyle=c.eggColor;glow(c.eggColor,12);ctx.beginPath();ctx.ellipse(c.x,c.y,rx,ry,0,0,6.283);ctx.fill();ctx.shadowBlur=0;
+ ctx.save();ctx.beginPath();ctx.ellipse(c.x,c.y,rx,ry,0,0,6.283);ctx.clip();       // las franjas no se salen del óvalo
+ ctx.strokeStyle=dk;ctx.lineWidth=Math.max(2,c.r*.14);
+ for(let k=0;k<4;k++){const y0=c.y+(k-1.5)*ry*.5;ctx.beginPath();                    // 4 franjas en zigzag
+  for(let j=0;j<=8;j++){const x=c.x-rx+j*rx/4,y=y0+(j%2?-1:1)*c.r*.14;ctx[j?'lineTo':'moveTo'](x,y)}ctx.stroke()}
+ ctx.restore();
+ ctx.strokeStyle=pk==='freeze'?'#ffffff':darken(c.eggColor,.55);ctx.lineWidth=2;ctx.beginPath();ctx.ellipse(c.x,c.y,rx,ry,0,0,6.283);ctx.stroke()}
+const hexA=(h,a)=>{const n=parseInt(h.slice(1),16);return 'rgba('+(n>>16&255)+','+(n>>8&255)+','+(n&255)+','+a+')'};
+/* Bloque F: forma del enemigo según su patrón (la colisión sigue siendo circular, radio c.r) */
+function drawCircleShape(c,pk){
+ const col=pk==='freeze'?'#cfe9ff':(c.color||'#ff3d5a'),x=c.x,y=c.y,r=c.r;
+ ctx.fillStyle='#160f1e';ctx.strokeStyle=col;ctx.lineWidth=3;glow(col,16);
+ if(c.type==='curve')poly(x,y,r,3,-Math.PI/2);                 // triángulo apuntando hacia arriba
+ else if(c.type==='bounce')poly(x,y,r,4,0);                    // rombo (cuadrado a 45°)
+ else if(c.type==='spiral'){ctx.beginPath();                   // espiral de 2 vueltas
+  for(let a=0;a<=12.566;a+=.25){const q=a/12.566*r;ctx[a?'lineTo':'moveTo'](x+Math.cos(a+c.rot)*q,y+Math.sin(a+c.rot)*q)}}
+ else{ctx.beginPath();ctx.arc(x,y,r,0,6.283)}                  // círculo clásico
+ ctx.fill();ctx.stroke();ctx.shadowBlur=0;
+ if(c.type==='line'||!c.type){                                 // 3 líneas internas giratorias
+  ctx.lineWidth=1.5;ctx.globalAlpha=.6;ctx.beginPath();
+  for(let i=0;i<3;i++){const a=c.rot+i*2.094;ctx.moveTo(x,y);ctx.lineTo(x+Math.cos(a)*r*.8,y+Math.sin(a)*r*.8)}ctx.stroke();ctx.globalAlpha=1}
+ else{ctx.globalAlpha=.25;ctx.lineWidth=1;ctx.beginPath();ctx.arc(x,y,r,0,6.283);ctx.stroke();   // aro tenue = zona de impacto
+  ctx.globalAlpha=1;ctx.fillStyle=col;ctx.beginPath();ctx.arc(x,y,2.5,0,6.283);ctx.fill()}}      // punto central
+/* Bloque J: cursor según la skin elegida (x,y,skin opcionales para las vistas previas) */
+function drawCursor(sc,x=mouse.x,y=mouse.y,skin=selSkin){
+ const col=sc?'#ffd166':'#e8ecff';
+ ctx.fillStyle='rgba(120,160,255,.18)';ctx.beginPath();ctx.arc(x,y,14,0,6.283);ctx.fill();
+ glow(sc?'#ffd166':'#9db4ff',sc?26:12);ctx.fillStyle=col;ctx.strokeStyle=col;ctx.lineWidth=2;
+ if(skin==='star'){ctx.beginPath();for(let i=0;i<10;i++){const a=-Math.PI/2+i*Math.PI/5,q=i%2?4:9;ctx[i?'lineTo':'moveTo'](x+Math.cos(a)*q,y+Math.sin(a)*q)}ctx.closePath();ctx.fill()}
+ else if(skin==='ring'){ctx.beginPath();ctx.arc(x,y,4,0,6.283);ctx.stroke();ctx.beginPath();ctx.arc(x,y,9,0,6.283);ctx.stroke()}
+ else if(skin==='diamond'){poly(x,y,8,4,0);ctx.fill()}
+ else{ctx.beginPath();ctx.arc(x,y,5,0,6.283);ctx.fill()}
+ ctx.shadowBlur=0;
+ if(sc){ctx.strokeStyle='#ffd166';ctx.lineWidth=2;ctx.beginPath();ctx.arc(x,y,18,0,6.283);ctx.stroke()}}
+function render(){
+ ctx.setTransform(K,0,0,K,0,0);ctx.fillStyle='#07080d';ctx.fillRect(0,0,W,H);
+ const t=G?G.t:performance.now()/1000;
+ if(G&&G.shake>.3)ctx.translate(rnd(-G.shake,G.shake),rnd(-G.shake,G.shake));
+ // fondo: cuadrícula, resplandor bajo el cursor y partículas que reaccionan
+ ctx.strokeStyle='rgba(120,140,200,.07)';ctx.lineWidth=1;ctx.beginPath();
+ for(let x=0;x<=W;x+=40){ctx.moveTo(x,0);ctx.lineTo(x,H)}for(let y=0;y<=H;y+=40){ctx.moveTo(0,y);ctx.lineTo(W,y)}ctx.stroke();
+ const gr=ctx.createRadialGradient(mouse.x,mouse.y,0,mouse.x,mouse.y,180);gr.addColorStop(0,'rgba(90,120,255,.14)');gr.addColorStop(1,'rgba(90,120,255,0)');
+ ctx.fillStyle=gr;ctx.fillRect(0,0,W,H);ctx.fillStyle='rgba(180,200,255,.35)';dust.forEach(d=>ctx.fillRect(d.x,d.y,2,2));
+ if(live()){
+  const pk=G.pu&&G.pu.k;
+  if(G.safeZone){   // Bloque G: zona segura
+   const z=G.safeZone;
+   ctx.fillStyle='rgba(125,255,178,.08)';ctx.beginPath();ctx.arc(z.x,z.y,z.r,0,6.283);ctx.fill();
+   ctx.strokeStyle='rgba(125,255,178,'+(0.4+0.3*Math.sin(t*6))+')';ctx.lineWidth=2;ctx.setLineDash([8,6]);
+   ctx.beginPath();ctx.arc(z.x,z.y,z.r,0,6.283);ctx.stroke();ctx.setLineDash([]);
+   txt('ZONA SEGURA '+z.t.toFixed(1),z.x,z.y-z.r-8,12,'#7dffb2','center')}
+  // orbes: rombo que cambia de verde a rojo, con anillo de vida restante
+  G.orbs.forEach(o=>{const c=orbColor(o),p=9+2*Math.sin(t*6+o.ph);glow(c);ctx.fillStyle=c;ctx.beginPath();
+   ctx.moveTo(o.x,o.y-p);ctx.lineTo(o.x+p*.7,o.y);ctx.lineTo(o.x,o.y+p);ctx.lineTo(o.x-p*.7,o.y);ctx.fill();ctx.shadowBlur=0;
+   ctx.strokeStyle=c;ctx.globalAlpha=.5;ctx.lineWidth=2;ctx.beginPath();ctx.arc(o.x,o.y,16,-1.57,-1.57+6.283*(1-o.age/o.life));ctx.stroke();ctx.globalAlpha=1;
+   if(o.golden){ctx.strokeStyle='rgba(255,209,102,'+(0.5+0.5*Math.sin(t*8))+')';ctx.lineWidth=1.5;ctx.beginPath();ctx.arc(o.x,o.y,20,0,6.283);ctx.stroke()}});   // anillo dorado parpadeante
+  if(G.puOrb){const p=G.puOrb,f=p.age>p.life-2&&Math.floor(t*8)%2;if(!f)puShape(p.k,p.x,p.y,15+2*Math.sin(t*5),PU[p.k].c,t)}
+  if(G.boss){   // Bloque K: jefe (antes de los círculos normales)
+   const b=G.boss,col=b.phase===1?'#ff3d5a':b.phase===2?'#ff8a3d':'#a07bff',br=b.r*(b.phase===3?1+.06*Math.sin(b.t*8):1);
+   ctx.fillStyle='#160f1e';ctx.strokeStyle=col;ctx.lineWidth=5;glow(col,25);
+   ctx.beginPath();ctx.arc(b.x,b.y,br,0,6.283);ctx.fill();ctx.stroke();ctx.shadowBlur=0;
+   ctx.lineWidth=2;ctx.globalAlpha=.7;   // patrón interno giratorio
+   for(let i=0;i<6;i++){const a=b.t+i*Math.PI/3;ctx.beginPath();ctx.moveTo(b.x,b.y);ctx.lineTo(b.x+Math.cos(a)*br*.8,b.y+Math.sin(a)*br*.8);ctx.stroke()}
+   ctx.globalAlpha=1;
+   for(let i=0;i<5;i++){ctx.fillStyle=i<b.hp?col:'rgba(255,255,255,.15)';ctx.fillRect(b.x-37+i*15,b.y-br-14,11,6)}}   // vida restante
+  // círculos de oleada: opacos, borde luminoso, estela y patrón giratorio
+  G.circles.forEach(c=>{
+   c.tr.forEach((q,i)=>{ctx.fillStyle=hexA(c.color||'#ff3d5a',i/c.tr.length*.12);ctx.beginPath();ctx.arc(q.x,q.y,c.r*(i/c.tr.length),0,6.283);ctx.fill()});
+   if(eggMode){drawEgg(c,pk);return}   // modo huevo: solo cambia el dibujo
+   drawCircleShape(c,pk)});
+ }
+ // estela y cursor
+ trail.forEach(p=>{ctx.fillStyle='rgba(140,170,255,'+p.l+')';ctx.beginPath();ctx.arc(p.x,p.y,2+p.l*5,0,6.283);ctx.fill()});
+ if(scene!=='over'&&scene!=='name'){
+  const vis=!G||G.inv<=0||Math.floor(G.t*12)%2===0,pk=G&&G.pu&&G.pu.k;
+  if(pk==='magnet'){ctx.strokeStyle='rgba(45,226,230,.35)';ctx.setLineDash([6,8]);ctx.beginPath();ctx.arc(mouse.x,mouse.y,150,0,6.283);ctx.stroke();ctx.setLineDash([])}
+  if(vis)drawCursor(pk==='shield')}
+ // partículas y textos flotantes
+ parts.forEach(p=>{ctx.globalAlpha=clamp(p.l/p.m,0,1);ctx.fillStyle=p.c;ctx.fillRect(p.x,p.y,p.s,p.s)});ctx.globalAlpha=1;
+ texts.forEach(f=>txt(f.s,f.x,f.y,f.sz,f.c,'center',clamp(f.l,0,1)));
+ ctx.setTransform(K,0,0,K,0,0);
+ if(live())drawHUD();
+ if(scene==='menu')drawMenu();else if(scene==='howto')drawHowTo();else if(scene==='records')drawRecords();
+ else if(scene==='name')drawName();else if(scene==='revive')drawRevive();else if(scene==='playmenu')drawPlayMenu();
+ else if(scene==='achievements')drawAchievements();else if(scene==='skins')drawSkins();else if(scene==='over')drawOver()}
+
+function drawHUD(){
+ const pk=G.pu&&G.pu.k;
+ // telegraph: borde rojo pulsante antes de la oleada (y destello en mini-oleadas)
+ const ea=G.phase==='tele'?.35+.35*Math.sin(G.t*14):G.flash>0?G.flash*.6:0;
+ if(ea>0){ctx.strokeStyle='rgba(255,61,90,'+ea+')';ctx.lineWidth=16;glow('#ff3d5a',30);ctx.strokeRect(0,0,W,H);ctx.shadowBlur=0}
+ if(pk==='slow'){ctx.fillStyle='rgba(160,123,255,.07)';ctx.fillRect(0,0,W,H)}
+ if(pk==='freeze'){ctx.fillStyle='rgba(255,255,255,.06)';ctx.fillRect(0,0,W,H)}
+ if(pk==='combo'){ctx.fillStyle='rgba(255,94,168,.06)';ctx.fillRect(0,0,W,H)}
+ if(G.phase==='tele')txt('¡OLEADA!',W/2,140,54,'#ff3d5a','center',.6+.4*Math.sin(G.t*14));
+ txt(String(G.score),24,40,28,'#e8ecff');
+ txt(G.endless?'Récord '+fmtTime(recEndless):'Récord '+Math.max(curRec(),G.score),24,60,13,'#7f88a8');
+ if(G.hc)txt('Mejor tiempo '+fmtTime(recHCTime),24,78,12,'#ff8a3d');
+ for(let i=0;i<Math.max(G.lives,0);i++){ctx.fillStyle='#ff3d5a';ctx.beginPath();ctx.arc(30+i*20,G.hc?98:80,6,0,6.283);ctx.fill()}
+ if(G.endless){txt('Tiempo '+fmtTime(G.endT),W/2,32,18,'#e8ecff','center');txt('Oleada '+(G.lvl-1),W/2,48,12,'#7f88a8','center')}
+ else txt('Nivel '+G.lvl,W/2,32,18,'#e8ecff','center');
+ if(G.combo>1||G.streak>0){
+  const gl=G.perfectStreak>=5&&G.combo>=6,cc=G.perfectStreak>=15?'#ff8a3d':'#ffd166';   // brillo con racha perfecta
+  if(gl)glow(cc,12);txt('x'+G.combo,W/2,66,26,cc,'center');if(gl)ctx.shadowBlur=0;
+  ctx.fillStyle='#ffd166';ctx.fillRect(W/2-40,74,80*clamp(G.comboT/(COMBO_TIME*G.mod.cmb),0,1),3)}
+ txt('Círculos: '+G.circles.length,W-24,34,14,G.circles.length?'#ff6b81':'#7f88a8','right');
+ if(G.hc){glow('#ff3d5a',10);txt('HARDCORE',W-24,54,13,'#ff3d5a','right');ctx.shadowBlur=0;txt('⏱ '+fmtTime(G.runT),W-24,72,13,'#ff8a3d','right')}   // indicador Hardcore en el HUD
+ else txt(G.mod.n,W-24,54,12,'#7f88a8','right');
+ if(G.pu){const p=PU[G.pu.k];txt(p.n,24,H-40,14,p.c);ctx.fillStyle=p.c;ctx.fillRect(24,H-32,120*G.pu.t/G.pu.m,4)}
+ if(eggMode)txt('🥚',W-24,H-40,18,'#ffd166','right');   // indicador del easter egg
+ if(G.armed)txt('¡Clic para detonar!',24,H-40,16,PU.bomb.c);
+ if(!G.endless){ctx.fillStyle='rgba(255,255,255,.1)';ctx.fillRect(W/2-180,H-22,360,6);ctx.fillStyle='#7dffb2';ctx.fillRect(W/2-180,H-22,360*clamp(G.energy/need(),0,1),6);
+  txt('Energía',W/2,H-28,11,'#7f88a8','center')}
+ if(G.banner.t>0){const a=clamp(G.banner.t,0,1);txt(G.banner.a,W/2,H/2-20,40,'#e8ecff','center',a);txt(G.banner.b,W/2,H/2+14,18,'#9db4ff','center',a)}}
+/* ===== PANTALLAS NUEVAS: menú, cómo jugar, récords, nombre y resultados ===== */
+// Rectángulo redondeado (no depende de ctx.roundRect para ser compatible con navegadores viejos)
+function rr(x,y,w,h,r){ctx.beginPath();ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath()}
+// Aviso discreto cuando localStorage no está disponible
+function drawWarn(){if(!storeOK)txt('Aviso: el almacenamiento no está disponible; los récords no se guardarán.',W/2,H-14,12,'#7f88a8','center')}
+// Botón del menú: borde luminoso y relleno cuando está seleccionado (teclado) o bajo el mouse (hover)
+function drawBtn(it,on){
+ const c=it.c,lit=on||it.hot,sz=it.sz||20,
+  pul=it.hot?.08*Math.sin(performance.now()/90):0,
+  lk=it.locked;
+ ctx.fillStyle=c;ctx.globalAlpha=lk?.02:lit?.14+pul:.04;
+ rr(it.x,it.y,it.w,it.h,10);ctx.fill();
+ ctx.strokeStyle=c;ctx.globalAlpha=lk?.2:lit?1:.3;
+ ctx.lineWidth=lk?1.2:lit?2.5:1.5;
+ if(lit&&!lk)glow(c,18);
+ rr(it.x,it.y,it.w,it.h,10);ctx.stroke();
+ ctx.shadowBlur=0;ctx.globalAlpha=1;
+ const label=(lk?'🔒 ':'')+it.label;
+ txt(label,it.x+it.w/2,it.y+it.h/2+sz*.35,sz,lk?'#5c6483':lit?'#e8ecff':'#aab3d0','center')}
+function drawMenu(){
+ ctx.fillStyle='rgba(7,8,13,.55)';ctx.fillRect(0,0,W,H);
+ glow('#7aa2ff',24);txt('ORBIQ',W/2,128,64,'#e8ecff','center');ctx.shadowBlur=0;
+ txt('Récord '+rec+'   ·   Hardcore '+recHC+'   ·   Mejor combo x'+bestCombo,W/2,172,18,'#ffd166','center');
+ const mi=items();mi.forEach((it,i)=>drawBtn(it,i===sel));
+ if(mi[sel])txt(mi[sel].d,W/2,542,15,mi[sel].c,'center');
+ txt('↑ ↓ / W S: mover   ·   Enter: elegir   ·   o usa el mouse   ·   M: sonido '+(muted?'NO':'SÍ'),W/2,572,14,'#7f88a8','center');
+ drawWarn()}
+// Subpantalla de modos de juego
+function drawPlayMenu(){
+ ctx.fillStyle='rgba(7,8,13,.7)';ctx.fillRect(0,0,W,H);
+ glow('#7aa2ff',24);txt('ELEGIR MODO',W/2,100,40,'#e8ecff','center');ctx.shadowBlur=0;
+ if(unlockedEndless)txt('Récord Oleada infinita: '+fmtTime(recEndless),W/2,140,14,'#2de2e6','center');
+ const pi=items();pi.forEach((it,i)=>drawBtn(it,i===sel));
+ const cur=pi[sel];if(cur&&cur.d)txt(cur.d,W/2,520,15,cur.c,'center');
+ txt('↑ ↓ / W S: mover   ·   Enter: elegir   ·   Esc: volver',W/2,572,13,'#7f88a8','center');
+ drawWarn()}
+// "Cómo jugar": instrucciones de la antigua pantalla de título (sin la pausa)
+function drawHowTo(){
+ ctx.fillStyle='rgba(7,8,13,.75)';ctx.fillRect(0,0,W,H);
+ glow('#7aa2ff',24);txt('ORBIQ',W/2,130,64,'#e8ecff','center');ctx.shadowBlur=0;
+ txt('Cómo jugar',W/2,172,20,'#7f88a8','center');
+ ['Clic en los orbes para recolectar energía; valen más cuanto antes los recojas.','Encadena orbes para subir el combo (hasta x5).',
+  'Cada tanto llega una OLEADA: no dejes que el cursor toque los círculos.','Recoge power-ups: escudo, imán, tiempo lento, congelar y detonador.',
+  'Modo Hardcore: una sola vida y oleadas más frecuentes. (sin opción de revivir)',
+  'M: silenciar   ·   Esc o Enter: volver al menú'].forEach((l,i)=>txt(l,W/2,235+i*32,17,i===5?'#9db4ff':i===4?'#ff6b81':'#aab3d0','center'));
+ txt('Récord '+rec+'   ·   Hardcore '+recHC+'   ·   Mejor combo x'+bestCombo,W/2,450,18,'#ffd166','center');
+ txt('Pulsa Enter',W/2,515,28,'#7dffb2','center',.6+.4*Math.sin(performance.now()/300))}
+// Fila de la tabla de récords (reutilizada en cada tabla y en el top 3 del game over); i = índice dentro de su propia tabla
+function scoreRow(e,i,y,sz){
+ const on=hl&&hl.e===e&&hl.t>0,c=on?'#ffd166':'#e8ecff';
+ if(on){ctx.fillStyle='rgba(255,209,102,'+(.12+.1*Math.sin(performance.now()/120))+')';rr(160,y-sz+1,640,sz+5,5);ctx.fill()}  // pulso de la entrada nueva
+ txt((i+1)+'.',210,y,sz,on?'#ffd166':'#7f88a8','right');txt(e.name,227,y,sz,c);txt(String(e.score),515,y,sz,c,'right');
+ txt('Niv '+e.level,635,y,sz,'#aab3d0','right');txt(fdate(e.date),675,y,sz,'#7f88a8')}
+// Una tabla (top 10) de un modo con su encabezado; y0 = borde superior del panel
+function drawTable(title,mode,tb,y0){
+ const mc=MODE_C[mode];
+ ctx.fillStyle='rgba(7,8,13,.5)';rr(150,y0,660,246,12);ctx.fill();ctx.strokeStyle='rgba(120,140,200,.25)';ctx.lineWidth=1.5;rr(150,y0,660,246,12);ctx.stroke();
+ glow(mc,10);txt(title,W/2,y0+22,18,mc,'center');ctx.shadowBlur=0;
+ txt('#',210,y0+44,11,'#7f88a8','right');txt('Nombre',227,y0+44,11,'#7f88a8');txt('Puntos',515,y0+44,11,'#7f88a8','right');
+ txt('Nivel',635,y0+44,11,'#7f88a8','right');txt('Fecha',675,y0+44,11,'#7f88a8');
+ if(!tb.length)txt('Aún no hay récords. ¡Sé el primero!',W/2,y0+140,16,'#7f88a8','center');
+ else tb.forEach((e,i)=>scoreRow(e,i,y0+66+i*19,14))}
+function drawRecords(){
+ ctx.fillStyle='rgba(7,8,13,.7)';ctx.fillRect(0,0,W,H);
+ drawTable('RÉCORDS — MODO NORMAL','normal',scoresNormal,12);
+ txt('Mejor tiempo: '+fmtTime(recHCTime),W/2,266-6,13,'#ff8a3d','center');
+ drawTable('RÉCORDS — MODO HARDCORE','hardcore',scoresHardcore,266);
+ items().forEach((it,i)=>drawBtn(it,i===sel));
+ txt('Esc o Enter: volver   ·   M: sonido',W/2,572,12,'#7f88a8','center');
+ drawWarn()}
+// Input de nombre dibujado en el canvas, con cursor parpadeante
+function drawName(){
+ ctx.fillStyle='rgba(7,8,13,.75)';ctx.fillRect(0,0,W,H);
+ txt('FIN DE LA PARTIDA',W/2,120,44,'#ff3d5a','center');
+ txt(G.hc?'MODO HARDCORE':'MODO NORMAL',W/2,152,16,MODE_C[G.mode],'center');
+ txt('Puntos: '+G.score,W/2,205,28,'#e8ecff','center');
+ if(G.endlessUnlockedNow)txt('¡MODO OLEADA INFINITA DESBLOQUEADO!',W/2,242,16,'#2de2e6','center');
+ txt('Escribe tu nombre para el ranking',W/2,275,18,'#aab3d0','center');
+ ctx.fillStyle='rgba(125,255,178,.08)';rr(W/2-170,300,340,56,10);ctx.fill();
+ ctx.strokeStyle='#7dffb2';ctx.lineWidth=2.5;glow('#7dffb2',16);rr(W/2-170,300,340,56,10);ctx.stroke();ctx.shadowBlur=0;
+ let cx=W/2;
+ if(nm.text){txt(nm.text,W/2,340,30,'#e8ecff','center');cx=W/2+ctx.measureText(nm.text).width/2+3}   // measureText usa la fuente que dejó txt()
+ else txt('Anónimo',W/2,340,30,'#e8ecff','center',.25);
+ if(Math.floor(performance.now()/500)%2===0){ctx.fillStyle='#7dffb2';ctx.fillRect(cx,314,2,30)}          // cursor parpadeante
+ txt(nm.text.length+'/'+NAME_MAX,W/2+170,378,12,'#7f88a8','right');
+ txt('Solo letras, números y espacios',W/2,378,12,'#7f88a8','center');
+ txt('Enter: confirmar   ·   Esc: omitir',W/2,440,16,'#9db4ff','center');
+ txt('Pulsa Enter',W/2,500,28,'#7dffb2','center',.6+.4*Math.sin(performance.now()/300));
+ drawWarn()}
+// Resultados: estadísticas, logros y top 3 de la tabla
+function drawOver(){
+ ctx.fillStyle='rgba(7,8,13,.75)';ctx.fillRect(0,0,W,H);
+ const cr=curRec(),tb=G.hc?scoresHardcore:scoresNormal;   // top 3 del modo jugado
+ txt('FIN DE LA PARTIDA',W/2,66,42,'#ff3d5a','center');
+ txt(G.endless?'MODO OLEADA INFINITA':G.hc?'MODO HARDCORE':'MODO NORMAL',W/2,98,16,MODE_C[G.mode],'center');
+ if(G.endless){
+  txt('Tiempo sobrevivido: '+fmtTime(G.endT)+'   (Récord: '+fmtTime(recEndless)+')',W/2,148,24,'#e8ecff','center');
+  txt('Nivel '+G.lvl+'   ·   Mejor combo x'+G.maxCombo+'   ·   Puntos '+G.score,W/2,180,16,'#aab3d0','center')}
+ else{
+  txt('Puntos: '+G.score+(G.score>=cr&&G.score>0?'  (¡nuevo récord'+(G.hc?' Hardcore':'')+'!)':''),W/2,148,26,'#e8ecff','center');
+  txt((G.hc?'Récord Hardcore ':'Récord ')+cr+'   ·   Nivel '+G.lvl+'   ·   Mejor combo x'+G.maxCombo+'   ·   Oleadas '+G.waves
+   +(G.hc?'   ·   Tiempo '+fmtTime(G.runT)+(G.runT>=recHCTime&&G.runT>0?'  (¡nuevo récord de tiempo!)':''):''),W/2,180,16,'#aab3d0','center')}
+ txt('Logros',W/2,218,18,'#ffd166','center');
+ ACH.forEach((a,i)=>txt((ach[a.id]?'✔ ':'○ ')+a.n+(G.newAch.includes(a.n)?'  — ¡nuevo!':''),W/2,240+i*19,15,ach[a.id]?'#7dffb2':'#5c6483','center'));
+ if(G.endless)txt('Modo sin tabla de récords · solo tiempo',W/2,380,16,'#7f88a8','center');
+ else{
+  txt('Top 3 — modo '+(G.hc?'Hardcore':'Normal'),W/2,352,18,'#ffd166','center');
+  if(!tb.length)txt('Aún no hay récords guardados',W/2,396,16,'#7f88a8','center');
+  else tb.slice(0,3).forEach((e,i)=>scoreRow(e,i,384+i*28,17));
+  if(hl&&tb.includes(hl.e))txt('¡Entraste al Top 10 en el puesto #'+(tb.indexOf(hl.e)+1)+'!',W/2,472,15,'#ffd166','center')}
+ if(G.endlessUnlockedNow)txt('¡MODO OLEADA INFINITA DESBLOQUEADO!  Ya está en el menú principal',W/2,498,17,'#2de2e6','center');
+ txt('Enter para volver al menú',W/2,525,28,'#7dffb2','center',.6+.4*Math.sin(performance.now()/300));
+ drawWarn()}
+
+/* ===== BLOQUE E: ¿REVIVIR? ===== */
+function drawRevive(){
+ ctx.fillStyle='rgba(7,8,13,.7)';ctx.fillRect(0,0,W,H);
+ glow('#ff3d5a',24);txt('¿REVIVIR?',W/2,170,64,'#ff3d5a','center');ctx.shadowBlur=0;
+ txt('Puntos actuales: '+G.score,W/2,240,22,'#e8ecff','center');
+ txt('Perderás la mitad de tus puntos ('+Math.floor(G.score/2)+')',W/2,285,20,'#ffd166','center');
+ items().forEach((it,i)=>drawBtn(it,i===sel));
+ txt('Solo puedes revivir una vez por partida.',W/2,490,15,'#7f88a8','center');
+ txt('← → / Enter: elegir',W/2,525,14,'#7f88a8','center');
+ if(G.hc){go('over');gameOver();return}}   // salvaguarda: en Hardcore no se muestra esta pantalla
+/* ===== BLOQUE I: LOGROS ===== */
+function drawAchievements(){
+ ctx.fillStyle='rgba(7,8,13,.75)';ctx.fillRect(0,0,W,H);
+ glow('#ffd166',22);txt('LOGROS',W/2,66,44,'#ffd166','center');ctx.shadowBlur=0;
+ txt(ACH.filter(a=>ach[a.id]).length+' / '+ACH.length+' desbloqueados',W/2,94,16,'#aab3d0','center');
+ ACH.forEach((a,i)=>{
+  const ok=!!ach[a.id],x=160,y=108+i*68,w=640,h=62;
+  ctx.fillStyle=ok?'rgba(125,255,178,.10)':'rgba(255,255,255,.04)';rr(x,y,w,h,12);ctx.fill();
+  ctx.strokeStyle=ok?'rgba(125,255,178,.7)':'rgba(120,140,200,.2)';ctx.lineWidth=ok?2:1.5;rr(x,y,w,h,12);ctx.stroke();
+  ctx.fillStyle=ok?'rgba(125,255,178,.18)':'rgba(255,255,255,.06)';ctx.beginPath();ctx.arc(x+40,y+h/2,26,0,6.283);ctx.fill();
+  ctx.globalAlpha=ok?1:.35;ctx.font='32px "Segoe UI Emoji","Apple Color Emoji",sans-serif';ctx.textAlign='center';ctx.fillStyle='#e8ecff';
+  ctx.fillText(a.ic,x+40,y+h/2+11);ctx.globalAlpha=1;
+  txt(a.n,x+84,y+26,18,ok?'#7dffb2':'#7f88a8');
+  txt(a.d,x+84,y+48,14,ok?'#aab3d0':'#5c6483')});
+ items().forEach((it,i)=>drawBtn(it,i===sel))}
+/* ===== BLOQUE J: SKINS DEL CURSOR ===== */
+function drawSkins(){
+ ctx.fillStyle='rgba(7,8,13,.75)';ctx.fillRect(0,0,W,H);
+ glow('#a07bff',22);txt('SKINS DEL CURSOR',W/2,100,40,'#e8ecff','center');ctx.shadowBlur=0;
+ txt('Se desbloquean con logros · clic o Enter para elegir',W/2,135,16,'#7f88a8','center');
+ items().forEach((it,i)=>{
+  if(!it.skin){drawBtn(it,i===sel);return}
+  const s=it.skin,ok=unlockedSkins.includes(s.id),cur=selSkin===s.id,cx=it.x+it.w/2;
+  ctx.fillStyle=ok?'rgba(160,123,255,.10)':'rgba(255,255,255,.03)';rr(it.x,it.y,it.w,it.h,12);ctx.fill();
+  ctx.strokeStyle=cur?'#a07bff':ok?'rgba(160,123,255,.4)':'rgba(120,140,200,.2)';ctx.lineWidth=cur?3:1.5;if(cur)glow('#a07bff',18);
+  rr(it.x,it.y,it.w,it.h,12);ctx.stroke();ctx.shadowBlur=0;
+  if(i===sel){ctx.strokeStyle='#e8ecff';ctx.globalAlpha=.5;ctx.lineWidth=1;rr(it.x-4,it.y-4,it.w+8,it.h+8,14);ctx.stroke();ctx.globalAlpha=1}
+  if(ok)drawCursor(false,cx,it.y+48,s.id);else txt('🔒',cx,it.y+60,30,'#5c6483','center');
+  txt(s.n,cx,it.y+92,17,ok?'#e8ecff':'#5c6483','center');
+  if(ok)txt(cur?'Seleccionada':'Clic para elegir',cx,it.y+118,12,cur?'#a07bff':'#7f88a8','center');
+  else{const a=ACH.find(q=>q.id===s.req);txt('Requiere el logro:',cx,it.y+114,11,'#5c6483','center');txt(a?a.n:'',cx,it.y+128,11,'#7f88a8','center')}})}
+
+/* ===== BUCLE PRINCIPAL (paso fijo) ===== */
+let last=0,acc=0;
+function frame(ts){requestAnimationFrame(frame);const d=Math.min(.1,(ts-last)/1000||0);last=ts;acc+=d;
+ while(acc>=DT){update();acc-=DT}render()}
+requestAnimationFrame(frame);
+})();
+</script></body></html>
